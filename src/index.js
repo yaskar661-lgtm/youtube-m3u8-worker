@@ -41,7 +41,7 @@ class YouTubeM3U8Extractor {
       "Accept-Language": "en-us,en;q=0.5",
       "Sec-Fetch-Mode": "navigate"
     };
-    this.cookies = "";
+    this.cookies = ""; // İstek başında ve akış sırasında otomatik güncellenen çerezler
     this._normalizeUrl();
   }
 
@@ -60,6 +60,7 @@ class YouTubeM3U8Extractor {
     } catch (e) {}
   }
 
+  // İstek başında çerezleri toplayan ve güncelleyen metod
   async _getRes(targetUrl = null) {
     let urlToFetch = targetUrl || this.url;
     
@@ -73,16 +74,16 @@ class YouTubeM3U8Extractor {
       redirect: "follow" 
     });
 
+    // YouTube'dan gelen Set-Cookie değerlerini yakala
     let setCookie = response.headers.get("Set-Cookie");
     if (setCookie) {
       this.cookies = setCookie;
     }
 
     let finalUrl = response.url;
-    
-    // Body'nin birden çok kez okunabilmesi için clone() kullanıyoruz
     let html = await response.clone().text();
 
+    // Çıkabilecek rıza (consent) duvarını otomatik aş ve çerezleri tazele
     if (new URL(finalUrl).hostname === "consent.youtube.com") {
       const matchForm = html.match(/<form action="([^"]+)"/);
       if (matchForm) {
@@ -108,7 +109,9 @@ class YouTubeM3U8Extractor {
         });
 
         let postSetCookie = postRes.headers.get("Set-Cookie");
-        if (postSetCookie) this.cookies = postSetCookie;
+        if (postSetCookie) {
+          this.cookies = postSetCookie;
+        }
 
         finalUrl = postRes.url;
         html = await postRes.clone().text();
@@ -196,6 +199,7 @@ class YouTubeM3U8Extractor {
     const apiKeyMatch = htmlText.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
     const apiKey = apiKeyMatch ? apiKeyMatch[1] : "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 
+    // İstediğiniz ANDROID client payload yapısı
     const apiUrl = `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`;
     const payload = {
       videoId: videoId,
@@ -203,13 +207,15 @@ class YouTubeM3U8Extractor {
       racyCheckOk: true,
       context: {
         client: {
-          clientName: "TVHTML5",
-          clientVersion: "7.20240411.10.00",
-          platform: "TV",
-          clientScreen: "WATCH",
+          clientName: "ANDROID",
+          clientVersion: "21.08.266",
+          platform: "DESKTOP",
+          clientScreen: "EMBED",
+          clientFormFactor: "UNKNOWN_FORM_FACTOR",
+          browserName: "Chrome",
         },
-        user: { lockedSafetyMode: false },
-        request: { useSsl: true },
+        user: { lockedSafetyMode: "false" },
+        request: { useSsl: "true" },
       },
     };
 
@@ -217,7 +223,9 @@ class YouTubeM3U8Extractor {
       ...this.headers, 
       "Content-Type": "application/json" 
     };
-    if (this.cookies) apiHeaders["Cookie"] = this.cookies;
+    if (this.cookies) {
+      apiHeaders["Cookie"] = this.cookies; // Toplanan güncel çerezler API isteğine ekleniyor
+    }
 
     const apiRes = await fetch(apiUrl, {
       method: "POST",
