@@ -1,9 +1,6 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    
-    // Kullanım: https://workers.dev
-    // Örnek: ?url=https://www.youtube.com/@KanalAdi/live veya ?url=https://youtu.be/...
     let targetUrl = url.searchParams.get("url");
 
     if (!targetUrl) {
@@ -17,35 +14,29 @@ export default {
       // 1. URL'yi Normalize Et
       targetUrl = normalizeUrl(targetUrl);
 
-      // Çerezleri/Session'ı simüle etmek için başlıklar
       const baseHeaders = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"'
       };
 
-      // 2. Doğrudan URL'den Video ID'yi Çıkarmayı Dene
+      // 2. Video ID'yi Çıkar
       let videoId = extractVideoId(targetUrl);
       let pageHtml = "";
 
-      // 3. ID bulunamadıysa veya Kanal/Live URL'siyse sayfayı ziyaret et
       if (!videoId || isChannelOrLiveUrl(targetUrl)) {
         const pageRes = await getWithConsentCheck(targetUrl, baseHeaders);
         pageHtml = pageRes.html;
-        
-        // Yönlendirilmiş nihai URL'den video ID'yi kontrol et
         videoId = extractVideoId(pageRes.finalUrl);
 
-        // Sayfa HTML'inden video ID'yi ara
-        if (!videoId) {
-          videoId = extractVideoIdFromHtml(pageHtml);
-        }
+        if (!videoId) videoId = extractVideoIdFromHtml(pageHtml);
 
-        // Canonical linkten ara
         if (!videoId) {
           const matchCanon = pageHtml.match(/<link rel="canonical" href="([^"]+)"/);
-          if (matchCanon) {
-            videoId = extractVideoId(matchCanon[1]);
-          }
+          if (matchCanon) videoId = extractVideoId(matchCanon[1]);
         }
       }
 
@@ -53,26 +44,65 @@ export default {
         throw new Error("YouTube Video ID veya aktif canlı yayın bulunamadı.");
       }
 
-      // 4. Eğer elimizde sayfa HTML'i yoksa Innertube API Anahtarı için watch sayfasını çek
+      // --- 3. CACHE (KV) KONTROLÜ ---
+      // KV servisi tanımlı mı kontrol ediyoruz (Hata almamak için güvenli yaklaşım)
+      const CACHE_TTL = 2 * 60 * 60 * 1000; // 2 Saat (Milisaniye cinsinden)
+      let cachedData = null;
+
+      if (env.YOUTUBE_CACHE) {
+        try {
+          cachedData = await env.YOUTUBE_CACHE.get(videoId, { type: "json" });
+        } catch (e) {
+          // KV okuma hatası olursa görmezden gelip API'ye devam et
+        }
+      }
+
+      // Eğer önbellek varsa ve süresi 2 saati geçmediyse doğrudan onu kullan
+      if (cachedData && (Date.now() - cachedData.timestamp < CACHE_TTL)) {
+        const apiResult = cachedData.result;
+        
+        if (apiResult.hls_manifest_url) {
+          return Response.redirect(apiResult.hls_manifest_url, 302);
+        }
+
+        return new Response(JSON.stringify({ ...apiResult, source: "cache" }, null, 2), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
+      }
+
+      // --- 4. YOUTUBE API'DEN YENİDEN ÇEK ---
       if (!pageHtml) {
         const watchPageRes = await getWithConsentCheck(`https://www.youtube.com/watch?v=${videoId}`, baseHeaders);
         pageHtml = watchPageRes.html;
       }
 
-      // Innertube API key bul veya varsayılanı kullan
       const apiKeyMatch = pageHtml.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
       const apiKey = apiKeyMatch ? apiKeyMatch[1] : "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 
-      // 5. Innertube API Çağrısı
       const apiResult = await callInnertubePlayer(videoId, apiKey, baseHeaders);
 
-      // Doğrudan M3U8 linkine yönlendirmek istiyorsanız:
+      // --- 5. YENİ VERİYİ KV'YE KAYDET ---
+      if (env.YOUTUBE_CACHE) {
+        try {
+          await env.YOUTUBE_CACHE.put(
+            videoId, 
+            JSON.stringify({
+              timestamp: Date.now(),
+              result: apiResult
+            }),
+            { expirationTtl: 7200 } // Cloudflare KV düzeyinde 2 saat sonra otomatik silinme (Saniye cinsinden)
+          );
+        } catch (e) {
+          // KV yazma hatası olursa yoksay
+        }
+      }
+
       if (apiResult.hls_manifest_url) {
         return Response.redirect(apiResult.hls_manifest_url, 302);
       }
 
-      // M3U8 yoksa JSON çıktısı döndür
-      return new Response(JSON.stringify(apiResult, null, 2), {
+      return new Response(JSON.stringify({ ...apiResult, source: "live" }, null, 2), {
         status: 200,
         headers: { "Content-Type": "application/json; charset=utf-8" }
       });
@@ -181,12 +211,13 @@ async function callInnertubePlayer(videoId, apiKey, headers) {
     racyCheckOk: true,
     context: {
       client: {
-        clientName: "ANDROID",
-        clientVersion: "21.08.266",
+        clientName: "WEB",
+        clientVersion: "2.20260101.01.00",
         platform: "DESKTOP",
         clientScreen: "EMBED",
         clientFormFactor: "UNKNOWN_FORM_FACTOR",
         browserName: "Chrome",
+        browserVersion: "120.0.0.0"
       },
       user: { lockedSafetyMode: false },
       request: { useSsl: true },
