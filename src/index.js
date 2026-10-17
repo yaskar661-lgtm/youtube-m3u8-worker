@@ -3,7 +3,7 @@ export default {
     const url = new URL(request.url);
     
     // Kullanım: https://workers.dev
-    // Örnek: ?url=https://www.youtube.com/@KanalAdi/live veya ?url=https://youtu.be
+    // Örnek: ?url=https://www.youtube.com/@KanalAdi/live veya ?url=https://youtu.be/...
     let targetUrl = url.searchParams.get("url");
 
     if (!targetUrl) {
@@ -14,7 +14,7 @@ export default {
     }
 
     try {
-      // 1. URL'yi Normalize Et (Python'daki _normalize_url)
+      // 1. URL'yi Normalize Et
       targetUrl = normalizeUrl(targetUrl);
 
       // Çerezleri/Session'ı simüle etmek için başlıklar
@@ -55,7 +55,7 @@ export default {
 
       // 4. Eğer elimizde sayfa HTML'i yoksa Innertube API Anahtarı için watch sayfasını çek
       if (!pageHtml) {
-        const watchPageRes = await getWithConsentCheck(`https://youtube.com{videoId}`, baseHeaders);
+        const watchPageRes = await getWithConsentCheck(`https://www.youtube.com/watch?v=${videoId}`, baseHeaders);
         pageHtml = watchPageRes.html;
       }
 
@@ -63,7 +63,7 @@ export default {
       const apiKeyMatch = pageHtml.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
       const apiKey = apiKeyMatch ? apiKeyMatch[1] : "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 
-      // 5. Innertube API Çağrısı (Python'daki ANDROID client payload'ı)
+      // 5. Innertube API Çağrısı
       const apiResult = await callInnertubePlayer(videoId, apiKey, baseHeaders);
 
       // Doğrudan M3U8 linkine yönlendirmek istiyorsanız:
@@ -71,7 +71,7 @@ export default {
         return Response.redirect(apiResult.hls_manifest_url, 302);
       }
 
-      // M3U8 yoksa veya JSON çıktıları görmek isterseniz:
+      // M3U8 yoksa JSON çıktısı döndür
       return new Response(JSON.stringify(apiResult, null, 2), {
         status: 200,
         headers: { "Content-Type": "application/json; charset=utf-8" }
@@ -86,7 +86,7 @@ export default {
   }
 };
 
-// --- YARDIMCI FONKSİYONLAR (Python metotlarının JS karşılıkları) ---
+// --- YARDIMCI FONKSİYONLAR ---
 
 function normalizeUrl(urlStr) {
   try {
@@ -95,7 +95,7 @@ function normalizeUrl(urlStr) {
       parsed.hostname = "www.youtube.com";
     } else if (parsed.hostname === "youtu.be") {
       const videoId = parsed.pathname.substring(1);
-      return `https://youtube.com{videoId}`;
+      return `https://www.youtube.com/watch?v=${videoId}`;
     }
     if (parsed.protocol !== "https:") {
       parsed.protocol = "https:";
@@ -138,13 +138,11 @@ function extractVideoIdFromHtml(html) {
   return null;
 }
 
-// Python'daki _get_res (Çerez/Consent Duvarı Yönetimi)
 async function getWithConsentCheck(url, headers) {
   let response = await fetch(url, { headers });
   let finalUrl = response.url;
   let html = await response.text();
 
-  // Eğer Google Rıza (Consent) duvarına takılırsa otomatik formu post et
   if (new URL(finalUrl).hostname === "consent.youtube.com") {
     const formActionMatch = html.match(/<form action="([^"]+)"/);
     if (formActionMatch) {
@@ -157,7 +155,6 @@ async function getWithConsentCheck(url, headers) {
         formData.append(match[1], match[2]);
       }
 
-      // Cookie takibi için ilk response başlıklarını alıyoruz
       const setCookie = response.headers.get("Set-Cookie");
       const postHeaders = { ...headers, "Content-Type": "application/x-www-form-urlencoded" };
       if (setCookie) postHeaders["Cookie"] = setCookie;
@@ -176,9 +173,8 @@ async function getWithConsentCheck(url, headers) {
   return { html, finalUrl };
 }
 
-// Innertube Player API İstek Fonksiyonu
 async function callInnertubePlayer(videoId, apiKey, headers) {
-  const apiUrl = `https://youtube.com{apiKey}`;
+  const apiUrl = `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`;
   const payload = {
     videoId: videoId,
     contentCheckOk: true,
