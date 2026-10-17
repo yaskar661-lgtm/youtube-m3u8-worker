@@ -45,7 +45,6 @@ export default {
       }
 
       // --- 3. CACHE (KV) KONTROLÜ ---
-      // KV servisi tanımlı mı kontrol ediyoruz (Hata almamak için güvenli yaklaşım)
       const CACHE_TTL = 2 * 60 * 60 * 1000; // 2 Saat (Milisaniye cinsinden)
       let cachedData = null;
 
@@ -53,11 +52,11 @@ export default {
         try {
           cachedData = await env.YOUTUBE_CACHE.get(videoId, { type: "json" });
         } catch (e) {
-          // KV okuma hatası olursa görmezden gelip API'ye devam et
+          // KV okuma hatası olursa yok say
         }
       }
 
-      // Eğer önbellek varsa ve süresi 2 saati geçmediyse doğrudan onu kullan
+      // Önbellek geçerliyse doğrudan kullan
       if (cachedData && (Date.now() - cachedData.timestamp < CACHE_TTL)) {
         const apiResult = cachedData.result;
         
@@ -91,10 +90,10 @@ export default {
               timestamp: Date.now(),
               result: apiResult
             }),
-            { expirationTtl: 7200 } // Cloudflare KV düzeyinde 2 saat sonra otomatik silinme (Saniye cinsinden)
+            { expirationTtl: 7200 } // Cloudflare KV 2 saatlik otomatik silinme (Saniye)
           );
         } catch (e) {
-          // KV yazma hatası olursa yoksay
+          // KV yazma hatası olursa yok say
         }
       }
 
@@ -211,13 +210,10 @@ async function callInnertubePlayer(videoId, apiKey, headers) {
     racyCheckOk: true,
     context: {
       client: {
-        clientName: "WEB",
-        clientVersion: "2.20260101.01.00",
-        platform: "DESKTOP",
-        clientScreen: "EMBED",
-        clientFormFactor: "UNKNOWN_FORM_FACTOR",
-        browserName: "Chrome",
-        browserVersion: "120.0.0.0"
+        clientName: "TVHTML5",
+        clientVersion: "7.20240411.10.00",
+        platform: "TV",
+        clientScreen: "WATCH",
       },
       user: { lockedSafetyMode: false },
       request: { useSsl: true },
