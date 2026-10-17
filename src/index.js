@@ -11,16 +11,13 @@ export default {
     }
 
     try {
-      // Python'daki YouTubeM3U8Extractor mantığı ile çalıştır
       const extractor = new YouTubeM3U8Extractor(targetUrl);
       const result = await extractor.getStreams();
 
-      // Eğer HLS (m3u8) adresi varsa doğrudan canlı yayına yönlendir
       if (result.hls_manifest_url) {
         return Response.redirect(result.hls_manifest_url, 302);
       }
 
-      // M3U8 yoksa JSON çıktısı döndür
       return new Response(JSON.stringify(result, null, 2), {
         status: 200,
         headers: { "Content-Type": "application/json; charset=utf-8" }
@@ -35,18 +32,16 @@ export default {
   }
 };
 
-// --- Python Sınıfının JavaScript Karşılığı ---
 class YouTubeM3U8Extractor {
   constructor(url) {
     this.url = url;
-    // İstediğiniz özel başlık seti
     this.headers = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-us,en;q=0.5",
       "Sec-Fetch-Mode": "navigate"
     };
-    this.cookies = ""; // Session çerezlerini otomatik taşımak için
+    this.cookies = "";
     this._normalizeUrl();
   }
 
@@ -62,9 +57,7 @@ class YouTubeM3U8Extractor {
         parsed.protocol = "https:";
       }
       this.url = parsed.toString();
-    } catch (e) {
-      // Geçersiz URL durumunda orijinali bırak
-    }
+    } catch (e) {}
   }
 
   async _getRes(targetUrl = null) {
@@ -80,16 +73,16 @@ class YouTubeM3U8Extractor {
       redirect: "follow" 
     });
 
-    // Çerezleri güncelle (Session simülasyonu)
     let setCookie = response.headers.get("Set-Cookie");
     if (setCookie) {
       this.cookies = setCookie;
     }
 
     let finalUrl = response.url;
-    let html = await response.text();
+    
+    // Body'nin birden çok kez okunabilmesi için clone() kullanıyoruz
+    let html = await response.clone().text();
 
-    // Python'daki consent.youtube.com (Rıza duvarı) kontrolü
     if (new URL(finalUrl).hostname === "consent.youtube.com") {
       const matchForm = html.match(/<form action="([^"]+)"/);
       if (matchForm) {
@@ -118,11 +111,9 @@ class YouTubeM3U8Extractor {
         if (postSetCookie) this.cookies = postSetCookie;
 
         finalUrl = postRes.url;
-        html = await postRes.text();
+        html = await postRes.clone().text();
         
-        // Yeni response objesi oluşturup url ve text'i güncelliyoruz
         response = new Response(html, { status: postRes.status, headers: postRes.headers });
-        // object assign ile response url'ini simüle ediyoruz
         Object.defineProperty(response, 'url', { value: finalUrl });
       }
     }
@@ -145,7 +136,7 @@ class YouTubeM3U8Extractor {
       const parsed = new URL(this.url);
       if (parsed.pathname.includes("/live") || parsed.pathname.includes("/channel/") || parsed.pathname.includes("/@")) {
         const res = await this._getRes();
-        const htmlText = await res.text();
+        const htmlText = await res.clone().text();
         
         let vid = this._extractVideoIdFromHtml(htmlText);
         if (vid) return vid;
@@ -182,7 +173,7 @@ class YouTubeM3U8Extractor {
 
     if (!videoId) {
       res = await this._getRes();
-      htmlText = await res.text();
+      htmlText = await res.clone().text();
       videoId = this._extractVideoIdFromHtml(htmlText);
       
       if (!videoId) {
@@ -199,13 +190,12 @@ class YouTubeM3U8Extractor {
 
     if (!res) {
       res = await this._getRes(`https://www.youtube.com/watch?v=${videoId}`);
-      htmlText = await res.text();
+      htmlText = await res.clone().text();
     }
 
     const apiKeyMatch = htmlText.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/);
     const apiKey = apiKeyMatch ? apiKeyMatch[1] : "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 
-    // Innertube API Çağrısı (TV veya Android Client ile)
     const apiUrl = `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`;
     const payload = {
       videoId: videoId,
