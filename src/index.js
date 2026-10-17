@@ -11,16 +11,14 @@ export default {
     }
 
     try {
+      // 1. URL'yi Normalize Et ve Video ID'yi Çıkar
       let videoId = extractVideoId(targetUrl);
-      
+
       const baseHeaders = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-us,en;q=0.5",
-        "Sec-Fetch-Mode": "navigate"
+        "Accept-Language": "en-US,en;q=0.9"
       };
 
-      // Eğer doğrudan ID yoksa kanal/live linkidir, ana sayfadan ID bul
       if (!videoId) {
         const pageRes = await fetch(targetUrl, { headers: baseHeaders, redirect: "follow" });
         const html = await pageRes.text();
@@ -31,61 +29,46 @@ export default {
         throw new Error("YouTube Video ID veya aktif canlı yayın bulunamadı.");
       }
 
-      // -- KRİTİK ÇÖZÜM: EMBED SAYFASINI KULLANMAK --
-      // YouTube embed sayfaları bot korumalarından arındırılmış JSON verisini doğrudan barındırır.
-      const embedUrl = `https://www.youtube.com/embed/${videoId}`;
-      const embedRes = await fetch(embedUrl, { headers: baseHeaders });
-      const embedHtml = await embedRes.text();
+      // 2. CACHE API KONTROLÜ
+      // Her video ID için özel bir cache URL'si simüle ediyoruz
+      const cacheUrl = `https://youtube-cache-internal/stream/${videoId}`;
+      const cacheKey = new Request(cacheUrl, { method: "GET" });
+      const cache = caches.default;
 
-      // Embed sayfasından ytInitialPlayerResponse verisini yakala
-      let playerResponse = null;
-      const jsonMatch = embedHtml.match(/ytInitialPlayerResponse\s*=\s*({.+?});<\/script>/);
-      
-      if (jsonMatch) {
-        try {
-          playerResponse = JSON.parse(jsonMatch[1]);
-        } catch (e) {}
-      }
-
-      if (!playerResponse) {
-        // Alternatif olarak config değişkenini dene
-        const altMatch = embedHtml.match(/ytplayer\.config\s*=\s*\{.+?["']args["']\s*:\s*\{.+?["']player_response["']\s*:\s*["']({.+?})["']/);
-        if (altMatch) {
-            try {
-                // Unicode escape karakterlerini temizleyerek parse et
-                let unescaped = altMatch[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-                playerResponse = JSON.parse(unescaped);
-            } catch (e) {}
+      let cachedResponse = await cache.match(cacheKey);
+      if (cachedResponse) {
+        const cachedData = await cachedResponse.json();
+        
+        if (cachedData.hls_manifest_url) {
+          return Response.redirect(cachedData.hls_manifest_url, 302);
         }
+
+        return new Response(JSON.stringify({ ...cachedData, source: "edge-cache" }, null, 2), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8" }
+        });
       }
 
-      if (!playerResponse) {
-        throw new Error("Embed sayfasından da player verisi çözülemedi. Yayın gizli veya korumalı olabilir.");
-      }
+      // 3. Innertube Player API Çağrısı (Önbellekte yoksa YouTube'a sor)
+      const apiResult = await callInnertubePlayer(videoId, baseHeaders);
 
-      const streamingData = playerResponse.streamingData || {};
-      let hlsManifestUrl = streamingData.hlsManifestUrl || null;
-
-      // HLS adresi doğrudan yoksa formatlar içinden .m3u8 ara
-      if (!hlsManifestUrl) {
-        const allFormats = [...(streamingData.formats || []), ...(streamingData.adaptiveFormats || [])];
-        for (const fmt of allFormats) {
-          if (fmt.url && fmt.url.includes(".m3u8")) {
-            hlsManifestUrl = fmt.url;
-            break;
-          }
+      // 4. Yeni Sonucu Cache API'ye Kaydet (2 Saat / 7200 Saniye)
+      const responseToCache = new Response(JSON.stringify(apiResult), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "public, max-age=7200" // 2 saat edge önbellek süresi
         }
+      });
+
+      // Arka planda önbelleğe yazma işlemini gerçekleştir
+      ctx.waitUntil(cache.put(cacheKey, responseToCache));
+
+      if (apiResult.hls_manifest_url) {
+        return Response.redirect(apiResult.hls_manifest_url, 302);
       }
 
-      if (hlsManifestUrl) {
-        return Response.redirect(hlsManifestUrl, 302);
-      }
-
-      return new Response(JSON.stringify({
-        video_id: videoId,
-        hls_manifest_url: hlsManifestUrl,
-        streaming_data: streamingData
-      }, null, 2), {
+      return new Response(JSON.stringify({ ...apiResult, source: "live-api" }, null, 2), {
         status: 200,
         headers: { "Content-Type": "application/json; charset=utf-8" }
       });
@@ -104,11 +87,12 @@ function extractVideoId(urlStr) {
     const patterns = [
       /(?:v\/|live\/|watch\?(?:.*&)?v=)([\w-]{11})/,
       /youtu\.be\/([\w-]{11})/,
-      /embed\/([\w-]{11})/
+      /embed\/([\w-]{11})/,
+      /@[\w-]+\/live/
     ];
     for (const pattern of patterns) {
       const match = urlStr.match(pattern);
-      if (match) return match[1];
+      if (match && match[1]) return match[1];
     }
   } catch (e) {}
   return null;
@@ -120,4 +104,50 @@ function extractVideoIdFromHtml(html) {
   const matchProp = html.match(/itemprop="videoId" content="([\w-]{11})"/);
   if (matchProp) return matchProp[1];
   return null;
+}
+
+async function callInnertubePlayer(videoId, headers) {
+  const apiKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
+  const apiUrl = `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`;
+  
+  const payload = {
+    videoId: videoId,
+    contentCheckOk: true,
+    racyCheckOk: true,
+    context: {
+      client: {
+        clientName: "TVHTML5",
+        clientVersion: "7.20240411.10.00",
+        platform: "TV",
+        clientScreen: "WATCH",
+      },
+      user: { lockedSafetyMode: false },
+      request: { useSsl: true },
+    },
+  };
+
+  const res = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await res.json();
+
+  const playability = data.playabilityStatus || {};
+  if (playability.status !== "OK") {
+    throw new Error(`Video oynatılamıyor / Erişilemiyor: ${playability.reason || "Bilinmeyen hata"}`);
+  }
+
+  const streamingData = data.streamingData || {};
+  
+  return {
+    video_id: videoId,
+    hls_manifest_url: streamingData.hlsManifestUrl || null,
+    formats: streamingData.formats || [],
+    adaptive_formats: streamingData.adaptiveFormats || []
+  };
 }
